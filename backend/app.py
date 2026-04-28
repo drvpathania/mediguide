@@ -1,109 +1,108 @@
-from fastapi import FastAPI
-from pydantic import BaseModel
+from fastapi import FastAPI, Depends
+from sqlalchemy.orm import Session
 from fastapi.middleware.cors import CORSMiddleware
 import os
+import json
 
-# OPTIONAL AI (safe import)
+from backend.database import SessionLocal, engine, Base
+from backend.models import Patient
+from backend.schemas import PatientCreate, PatientResponse
+
+# Create DB tables
+Base.metadata.create_all(bind=engine)
+
+# -------- AI SETUP --------
 try:
     from openai import OpenAI
-    import os
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
     AI_ENABLED = True
-except:
+except Exception as e:
+    print("AI disabled:", e)
     AI_ENABLED = False
 
 app = FastAPI()
 
-# ✅ CORS (VERY IMPORTANT for Netlify)
+# -------- CORS --------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # later restrict to your domain
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# -------------------------------
-# REQUEST MODEL
-# -------------------------------
-class PatientInput(BaseModel):
-    name: str
-    age: int
-    symptoms: str
+# -------- DB DEP --------
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
-
-# -------------------------------
-# ROOT
-# -------------------------------
+# -------- ROOT --------
 @app.get("/")
-def read_root():
+def root():
     return {"message": "Mediguide API running 🚀"}
 
+# -------- CREATE PATIENT --------
+@app.post("/patients", response_model=PatientResponse)
+def create_patient(data: PatientCreate, db: Session = Depends(get_db)):
+    patient = Patient(**data.dict())
+    db.add(patient)
+    db.commit()
+    db.refresh(patient)
+    return patient
 
-# -------------------------------
-# ANALYZE (MAIN API)
-# -------------------------------
+# -------- GET PATIENTS --------
+@app.get("/patients")
+def get_patients(db: Session = Depends(get_db)):
+    return db.query(Patient).all()
+
+# -------- AI ANALYZE --------
 @app.post("/analyze")
-def analyze(data: PatientInput):
+def analyze(data: PatientCreate):
 
-    symptoms = data.symptoms.lower()
+    fallback = {
+        "diagnosis": "General ENT Issue",
+        "differentials": ["Otitis externa", "CSOM", "Fungal infection"],
+        "advice": "Consult ENT specialist",
+        "treatment": "Clinical examination required",
+        "urgency": "Medium"
+    }
 
-    # ----------------------------------
-    # 🔵 RULE-BASED FALLBACK (ALWAYS SAFE)
-    # ----------------------------------
-    diagnosis = "General ENT Issue"
-    advice = "Consult ENT specialist"
-    urgency = "Low"
-
-    if "ear pain" in symptoms:
-        diagnosis = "Possible Ear Infection (Otitis)"
-        advice = "Avoid water entry, may need ear drops"
-        urgency = "Medium"
-
-    elif "snoring" in symptoms:
-        diagnosis = "Possible Sleep Apnea"
-        advice = "Sleep study recommended"
-        urgency = "High"
-
-    elif "throat pain" in symptoms:
-        diagnosis = "Tonsillitis / Pharyngitis"
-        advice = "Warm saline gargles, ENT consult"
-        urgency = "Low"
-
-    # ----------------------------------
-    # 🟣 AI ENHANCEMENT (if available)
-    # ----------------------------------
     if AI_ENABLED:
         try:
+            prompt = f"""
+You are an experienced ENT specialist.
+
+Patient:
+Name: {data.name}
+Age: {data.age}
+Symptoms: {data.symptoms}
+
+Respond ONLY in JSON:
+{{
+  "diagnosis": "...",
+  "differentials": ["...", "..."],
+  "advice": "...",
+  "treatment": "...",
+  "urgency": "Low/Medium/High"
+}}
+"""
+
             response = client.chat.completions.create(
                 model="gpt-4o-mini",
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "You are an ENT specialist. Give diagnosis, advice, and urgency (Low/Medium/High)."
-                    },
-                    {
-                        "role": "user",
-                        "content": f"Patient: {data.name}, Age: {data.age}, Symptoms: {data.symptoms}"
-                    }
-                ],
+                messages=[{"role": "user", "content": prompt}]
             )
 
-            ai_text = response.choices[0].message.content
+            content = response.choices[0].message.content.strip()
+            content = content.replace("```json", "").replace("```", "")
 
-            # simple override (optional)
-            diagnosis = "AI Suggestion"
-            advice = ai_text
-            urgency = "Consult Doctor"
+            ai_output = json.loads(content)
+
+            return {**fallback, **ai_output}
 
         except Exception as e:
-            print("AI failed, using fallback:", e)
+            print("AI error:", e)
 
-    # ----------------------------------
-    # RESPONSE
-    # ----------------------------------
-    return {
-        "diagnosis": diagnosis,
-        "advice": advice,
-        "urgency": urgency
-    }
+    return fallback
