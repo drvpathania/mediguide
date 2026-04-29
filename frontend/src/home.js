@@ -6,6 +6,8 @@ export default function Home() {
   return (
     <div style={{ textAlign: "center", padding: 20 }}>
 
+      <h1 style={{color:"red"}}>HOME PAGE WORKING</h1>
+
       {/* HERO */}
       <h1>Dr Vishal Pathania</h1>
       <h2>ENT Specialist in Gurgaon</h2>
